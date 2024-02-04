@@ -7,6 +7,7 @@ from openai import OpenAI
 import argparse
 import pydub
 from tqdm import tqdm
+import subprocess
 
 from elevenlabs import set_api_key
 from elevenlabs import generate, stream, save
@@ -45,20 +46,59 @@ def generate_audio_data(voice: Voice, text: str, stream: bool = False):
         stream=stream
     )
 
+def generate_dectalk_audio(voice: int, dialog: str, file: str):
+    """Generate an audio file using DecTalk
+
+    Args:
+        voice (int): Which preset voice to use (0-9)
+        dialog (str): The text to read out
+        file (str): The location of the audio file
+    """    
+    folder = os.path.dirname(file)
+    if not os.path.exists(folder):
+        os.makedirs(folder)
+    subprocess.run(["./dectalk/say","-e","1","-s",str(voice),"-a",dialog,"-fo",file])
+
 def save_list(l: list, file: str):
     with open(file, "w") as f:
         f.writelines(f"{line}\n" for line in l)
 
 args = parse_args()
 
-DEFAULT_VOICE = {"voice":get_voice("onwK4e9ZLuTAKqWW03F9", style=0)} # Daniel
+DEFAULT_VOICE = {
+    "voice": {
+        #"source": "EL",
+        #"voice": get_voice("onwK4e9ZLuTAKqWW03F9", style=0) # Daniel
+        "source": "DT",
+        "voice": 2,
+    }
+}
 
 characters = {
     "MIMI": {
         "name": "Mimi",
         "description": "an overly positive girl that everyone hates because she sounds like a tiktok influencer. She always shouts in CAPITAL LETTERS and an exclamation point!",
-        "voice": get_voice("zrHiDhphv9ZnVXBqCLjz", style=0)
-    }
+        "voice": {
+            "source": "EL",
+            "voice": get_voice("zrHiDhphv9ZnVXBqCLjz", style=0)
+        }
+    },
+    "HAWK": {
+        "name": "Steven Hawking",
+        "description": "a super intelligent, wheelchair-bound British man",
+        "voice": {
+            "source": "DT",
+            "voice": 0
+        }
+    },
+    "SANDRA": {
+        "name": "Sandra",
+        "description": "a weird girl that enjoys cereal to a disturbing degree",
+        "voice": {
+            "source": "DT",
+            "voice": 1
+        }
+    },
 }
 
 sfx = {
@@ -74,6 +114,7 @@ sfx = {
     "BIG_GLASS_SMASH",
     "GLASS_SHATTER",
     "DOOR_SMASH_BREAK",
+    "MAGIC",
 }
 
 pattern_dialog = re.compile(r"\[(.+)\]:\s?\[?(.+)\]?")
@@ -184,14 +225,22 @@ for line in generated_output:
 
         voice = characters.get(character, DEFAULT_VOICE)["voice"]
 
-        audio_file_name = f"generated/{folder_name}/{audio_count:03} - {character}.mp3"
+        audio_file_name = f"generated/{folder_name}/{audio_count:03} - {character}"
 
-        # Play existing audio file
-        if os.path.exists(audio_file_name):
+        # Select correct file type
+        if voice["source"] == "EL": # ElevenLabs
+            audio_file_name += ".mp3"
+        elif voice["source"] == "DT": # DecTalk
+            audio_file_name += ".wav"
+        
+        if os.path.exists(audio_file_name): # Play existing audio file
             if not args.file_only: playsound.playsound(audio_file_name)
-        else:
-            data = stream(generate_stream(voice, dialog))
+        elif voice["source"] == "EL": # Generate using elevenlabs
+            data = stream(generate_stream(voice["voice"], dialog))
             save(data, audio_file_name)
+        elif voice["source"] == "DT": # Generate using DecTalk
+            generate_dectalk_audio(voice["voice"], dialog, audio_file_name)
+            if not args.file_only: playsound.playsound(audio_file_name)
 
         # Add the audio for contat
         audio_file_list.append(audio_file_name)
@@ -206,7 +255,7 @@ for line in generated_output:
 combined_audio = pydub.AudioSegment.empty()
 
 for audio in tqdm(audio_file_list, total=len(audio_file_list), desc="Audio Compile", unit=" files"):
-    file = pydub.AudioSegment.from_mp3(audio)
+    file = pydub.AudioSegment.from_file(audio)
     combined_audio += file
 
 combined_audio.export(f"generated/{folder_name}/{title}.mp3", format="mp3")
