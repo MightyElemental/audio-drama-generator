@@ -1,0 +1,15 @@
+name: gpt-story
+channels:
+    - defaults
+    - anaconda
+    - conda-forge
+dependencies:
+    - python=3.12.1
+    - tqdm>=4.64.0
+    - pip
+    - pyparsing
+    - pydub
+    - pip:
+        - openai
+        - elevenlabs
+        - playsound
