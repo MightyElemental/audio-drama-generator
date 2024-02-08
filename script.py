@@ -322,10 +322,10 @@ def generate_script(prompt: str, version: int = 4, compress: bool = True):
     instruction_text = f"You will write scripts involving some or all of the following characters along with their CHARACTER_NAME variables in brackets:\n{character_prompt}. You will write character dialogue based on the user's prompt. Expand upon the user's prompt by generating a more detailed scenario. The first line of the output will be a title for the script. Do NOT end the story on a happy note unless the user has explicitly asked for it. Do NOT include any stage direction or action."
     # , however, you can also write a detailed description of the visuals that can be passed into an image generator so the audience can see what you're thinking of
 
-    sfx_text = f"You may also use any of the following sound effects [{sfx_prompt}] by starting the line with the keyword 'SFX' without brackets. The name of the sound MUST match the ones found in the list. ONLY use sound effects where the story calls for them."
+    sfx_text = f"You may also use sound effects by using a key value pair delimited by a colon: SFX:SOUND_NAME. 'SFX' is a keyword and SOUND_NAME is an EXACT match to any from this list: [{sfx_prompt}]. ONLY use sound effects where the story calls for them."
 
-    format_text = "Character dialogue will be on a new line and formatted as such: [CHARACTER_NAME]:[CHARACTER_DIALOGUE] where the brackets are kept intact. The output will be parsed by another program so the format must remain the same."
-    # \nVisual descriptions will begin with the keyword 'VISUAL'. 
+    format_text = "Each character's dialogue will be on a new line and formatted as a key value pair deliminated by a colon: [CHARACTER_NAME]:[CHARACTER_DIALOGUE]. The CHARACTER_NAME MUST be encapulated by square brackets and be an EXACT match to one previously listed."
+    # \nVisual descriptions will begin with the keyword 'VISUAL'.
 
     if compress:
         # Disabled instruction compression for now until stability to verified
@@ -353,6 +353,7 @@ def generate_script(prompt: str, version: int = 4, compress: bool = True):
             }
         ],
         model="gpt-4-turbo-preview" if version == 4 else "gpt-3.5-turbo",
+        stream=True,
     )
 
 args = parse_args()
@@ -373,24 +374,24 @@ DEFAULT_VOICE = {
 }
 
 characters = {
-    "FERGUS": {
-        "name": "Fergus",
-        "description": "a posh, British, university student who likes to belittle people.",
-        "voice": {
-            # "source": "OAI",
-            # "voice": "fable",
-            "source": "OV",
-            "voice": "OAI_FABLE"
-        }
-    },
-    "WALTER": {
-        "name": "Walter White",
-        "description": "a father and drug manufacturer from the show Breaking Bad",
-        "voice": {
-            "source": "OV",
-            "voice": "WALTER"
-        }
-    },
+    # "FERGUS": {
+    #     "name": "Fergus",
+    #     "description": "a posh, British, university student who likes to belittle people.",
+    #     "voice": {
+    #         # "source": "OAI",
+    #         # "voice": "fable",
+    #         "source": "OV",
+    #         "voice": "OAI_FABLE"
+    #     }
+    # },
+    # "WALTER": {
+    #     "name": "Walter White",
+    #     "description": "a father and drug manufacturer from the show Breaking Bad",
+    #     "voice": {
+    #         "source": "OV",
+    #         "voice": "WALTER"
+    #     }
+    # },
     # "DAN": {
     #     "name": "Daniel",
     #     "description": "a creepy man who only speaks in disgusting innuendos",
@@ -407,16 +408,16 @@ characters = {
     #         "voice": get_el_voice("onwK4e9ZLuTAKqWW03F9", style=0) # ElevenLabs Daniel
     #     }
     # },
-    # "MIMI": {
-    #     "name": "Mimi",
-    #     "description": "an overly positive girl that everyone hates because she sounds like a tiktok influencer. She always shouts in CAPITAL LETTERS and an exclamation point!",
-    #     "voice": {
-    #         # "source": "EL",
-    #         # "voice": get_el_voice("zrHiDhphv9ZnVXBqCLjz", style=0)
-    #         "source": "OV",
-    #         "voice": "EL_MIMI"
-    #     }
-    # },
+    "MIMI": {
+        "name": "Mimi",
+        "description": "an overly positive girl that everyone hates because she sounds like a tiktok influencer. She always shouts in CAPITAL LETTERS and an exclamation point!",
+        "voice": {
+            # "source": "EL",
+            # "voice": get_el_voice("zrHiDhphv9ZnVXBqCLjz", style=0)
+            "source": "OV",
+            "voice": "EL_MIMI"
+        }
+    },
     "JESSE": {
         "name": "Jesse Pinkman",
         "description": "from Breaking Bad",
@@ -445,23 +446,31 @@ characters = {
     #         "voice": "OAI_NOVA"
     #     }
     # },
+    "NEIL": {
+        "name": "Neil deGrasse Tyson",
+        "description": "a popular scientist that can't stop talking",
+        "voice": {
+            "source": "OV",
+            "voice": "GRASSMAN"
+        }
+    },
 }
 
 sfx = [
-    "FURIOUS_KEYBOARD_TYPING",
-    "GNOME",
-    "METAL_PIPE_CRASH",
     "DOOR_CLOSE",
     "DOOR_OPEN",
-    "GOOFY_CAR_HORN",
-    "BAD_TO_THE_BONE_FUNNY",
-    "FBI_OPEN_UP",
-    "AMOGUS_MUSIC_BASS_BOOSTED",
+    "DOOR_SMASH_BREAK",
     "AUTOMATIC_GUN_FIRE",
     "BIG_GLASS_SMASH",
     "GLASS_SHATTER",
-    "DOOR_SMASH_BREAK",
-    "MAGIC_SPARKLES",
+    #"MAGIC_SPARKLES",
+    #"GOOFY_CAR_HORN",
+    #"BAD_TO_THE_BONE_FUNNY",
+    #"FBI_OPEN_UP",
+    #"AMOGUS_MUSIC_BASS_BOOSTED",
+    #"FURIOUS_KEYBOARD_TYPING",
+    #"GNOME",
+    #"METAL_PIPE_CRASH",
 ]
 
 pattern_dialog = re.compile(r"\[(.+?)(?:,.*)?\]:\s?\[?(.+)\]?")
@@ -487,8 +496,16 @@ if args.script is None:
         user_prompt = input("Prompt: ")
     
     print("Generating script...")
-    output = generate_script(user_prompt, args.gptversion, not args.nocompression)
-    generated_output = output.choices[0].message.content
+    output_stream = generate_script(user_prompt, args.gptversion, not args.nocompression)
+    generated_output = ""
+    pbar = tqdm(unit=" chunks", desc="Generating using GPT")
+    for chunk in output_stream:
+        content = chunk.choices[0].delta.content
+        if content is not None:
+            generated_output += content
+            pbar.update()
+    pbar.close()
+    # generated_output = output.choices[0].message.content
     generated_output = generated_output.split("\n")
 else:
     with open(args.script, "r") as f:
