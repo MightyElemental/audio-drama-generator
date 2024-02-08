@@ -169,10 +169,11 @@ def preprocess_output_lines(lines: str) -> dict:
         dict: The data for further processing
     """    
     output = {}
-    audio_count = 0
+    audio_count = 0 # audio line count
+    voice_count = 0 # voice line count
     for line in tqdm(lines, total=len(lines), unit=" lines"):
         match_dialog = pattern_dialog.match(line)
-        match_sfx = pattern_sfx.match(line)
+        match_sfx = pattern_sfx.match(line) # TODO: Improve SFX matching
         if match_dialog:
             character, dialog = match_dialog.groups()
             dialog = strip_stage_directions(dialog) # Remove stage direction if present
@@ -185,7 +186,7 @@ def preprocess_output_lines(lines: str) -> dict:
                     audio_count += 1
                 continue # stop further processing of dialog
 
-            audio_file_name = get_voice_audio_file_name(audio_count, character)
+            audio_file_name = get_voice_audio_file_name(voice_count, character)
 
             output[audio_count] = {
                 "character": character,
@@ -194,6 +195,7 @@ def preprocess_output_lines(lines: str) -> dict:
             }
 
             audio_count += 1
+            voice_count += 1
         elif match_sfx:
             sound = match_sfx.groups()[0].upper()
             data = _sfx_data(sound)
@@ -372,10 +374,10 @@ characters = {
         "name": "Fergus",
         "description": "a posh, British, university student who likes to belittle people.",
         "voice": {
-            "source": "OAI",
-            "voice": "fable",
-            # "source": "OV",
-            # "voice": "OAI_FABLE"
+            # "source": "OAI",
+            # "voice": "fable",
+            "source": "OV",
+            "voice": "OAI_FABLE"
         }
     },
     "WALTER": {
@@ -459,7 +461,7 @@ sfx = [
     "MAGIC_SPARKLES",
 ]
 
-pattern_dialog = re.compile(r"\[(.+)\]:\s?\[?(.+)\]?")
+pattern_dialog = re.compile(r"\[(.+?)(?:,.*)?\]:\s?\[?(.+)\]?")
 pattern_sfx = re.compile(r"\[?SFX\]?:\s?\[?(.+)\]?")
 
 with open('openai.key', 'r') as file:
