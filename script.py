@@ -315,6 +315,25 @@ def export_complete_audio(script: dict, folder_name: str, title: str):
 
     combined_audio.export(export_name, format="mp3")
 
+def generate_image(prompt: str, model: int = 2) -> str:
+    """Generates an image using DALL-E and returns the image URL
+
+    Args:
+        prompt (str): The description of image to generate
+        model (int, optional): The DALL-E model to use. Defaults to 2.
+
+    Returns:
+        str: The URL of the generated image
+    """    
+    if model not in [2,3]: model = 2
+    response = client.images.generate(
+        model=f"dall-e-{model}",
+        prompt=prompt,
+        size="256x256",
+        n=1
+    )
+    return response.data[0].url
+
 def generate_script(prompt: str, version: int = 4, compress: bool = True):
     character_prompt = generate_character_strlist()
     sfx_prompt = generate_sfx_strlist()
@@ -335,22 +354,10 @@ def generate_script(prompt: str, version: int = 4, compress: bool = True):
 
     return client.chat.completions.create(
         messages=[
-            {
-                "role": "system",
-                "content": instruction_text,
-            },
-            {
-                "role": "system",
-                "content": sfx_text,
-            },
-            {
-                "role": "system",
-                "content": format_text,
-            },
-            {
-                "role": "user",
-                "content": prompt or "make up a random story",
-            }
+            { "role": "system", "content": instruction_text, },
+            { "role": "system", "content": sfx_text, },
+            { "role": "system", "content": format_text, },
+            { "role": "user",   "content": prompt or "make up a random story", }
         ],
         model="gpt-4-turbo-preview" if version == 4 else "gpt-3.5-turbo",
         stream=True,
