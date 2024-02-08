@@ -25,8 +25,9 @@ def parse_args():
     parser.add_argument("-s", "--script", type=str, default=None, help="The location of the script to generate/read")
     parser.add_argument("-p", "--prompt", type=str, default=None, help="The prompt to generate the scene")
     parser.add_argument("-f", "--file_only", action="store_true", help="Whether the audio playback should be skipped")
-    parser.add_argument("--gptversion", type=int, default=4, help="The version of GPT to use")
+    parser.add_argument("--gptversion", type=int, default=4, choices=[3,4], help="The version of GPT to use")
     parser.add_argument("-c", "--nocompression", action="store_true", help="Disable instruction prompt compression")
+    parser.add_argument("-i", "--dallever", type=int, default=2, choices=[2,3], help="Which version of DALL-E to use to generate visuals")
     return parser.parse_args()
 
 def create_folder(folder_path: str):
@@ -121,8 +122,11 @@ def save_list(l: list, file: str):
     with open(file, "w") as f:
         f.writelines(f"{line}\n" for line in l)
 
+def get_output_folder():
+    return f"generated/{folder_name}"
+
 def get_voice_audio_file_name(audio_count: int, character: str) -> str:
-    audio_file_name = f"generated/{folder_name}/{audio_count:03} - {character}"
+    audio_file_name = f"{get_output_folder()}/{audio_count:03} - {character}"
     voice = characters.get(character, DEFAULT_VOICE)["voice"]
     # Select correct file type
     if voice["source"] in ["EL", "OAI"]: # ElevenLabs
@@ -131,23 +135,25 @@ def get_voice_audio_file_name(audio_count: int, character: str) -> str:
         audio_file_name += ".wav"
     return audio_file_name
 
-def process_line_generate_voice_dialog(line: dict):
-    """Generates the audio file required for the line of the script
+def process_line_to_generate(line: dict):
+    """Generates the media file required for the line of the script
 
     Args:
         line (dict): The script line data including character, dialog, and file path for audio
     """
+    file_name = line["file"]
+    content = line["content"]
     character = line["character"]
-    if character != "[SFX]": # do not attempt to generate sound effect
-        audio_file_name = line["file"]
-        dialog = line["content"]
 
+    if character == "[VISUAL]":
+        if not os.path.exists(file_name):
+            generate_and_save_image(content, file_name, args.dallever)
+    elif character != "[SFX]": # do not attempt to generate sound effect
         voice = characters.get(character, DEFAULT_VOICE)["voice"]
-
         # Generate if file does not already exist
-        if not os.path.exists(audio_file_name):
-            generate_voice_audio(voice, dialog, audio_file_name)
-
+        if not os.path.exists(file_name):
+            generate_voice_audio(voice, content, file_name)
+        
 def _sfx_data(sfx_name: str) -> dict | None:
     output = None
     audio_file_name = soundfx(sfx_name)
@@ -169,53 +175,69 @@ def preprocess_output_lines(lines: str) -> dict:
         dict: The data for further processing
     """    
     output = {}
-    audio_count = 0 # audio line count
+    line_count = 0 # audio line count
     voice_count = 0 # voice line count
+    img_count = 0 # image line count
     for line in tqdm(lines, total=len(lines), unit=" lines"):
+        # Find matches
         match_dialog = pattern_dialog.match(line)
         match_sfx = pattern_sfx.match(line) # TODO: Improve SFX matching
-        if match_dialog:
+        match_img = pattern_img.match(line)
+
+        if match_sfx: # Add sound effect
+            sound = match_sfx.groups()[0].upper()
+            data = _sfx_data(sound)
+            if data:
+                output[line_count] = data
+                line_count += 1
+        elif match_img: # Add image
+            img_prompt = match_img.groups()[0]
+            output[line_count] = {
+                "character": "[VISUAL]",
+                "content": img_prompt,
+                "file": f"{get_output_folder()}/{img_count:02d}.jpg"
+            }
+            line_count += 1
+            img_count += 1
+        elif match_dialog: # Add dialog
             character, dialog = match_dialog.groups()
             dialog = strip_stage_directions(dialog) # Remove stage direction if present
             dialog = dialog.strip() # strip whitespace
 
-            if character == "SFX": # Sometimes GPT fails the formatting, so filter out SFX
-                data = _sfx_data(dialog)
-                if data:
-                    output[audio_count] = data
-                    audio_count += 1
-                continue # stop further processing of dialog
+            # if character == "SFX": # Sometimes GPT fails the formatting, so filter out SFX
+            #     data = _sfx_data(dialog)
+            #     if data:
+            #         output[line_count] = data
+            #         line_count += 1
+            #     continue # stop further processing of dialog
 
             audio_file_name = get_voice_audio_file_name(voice_count, character)
 
-            output[audio_count] = {
+            output[line_count] = {
                 "character": character,
                 "content": dialog,
                 "file": audio_file_name
             }
 
-            audio_count += 1
+            line_count += 1
             voice_count += 1
-        elif match_sfx:
-            sound = match_sfx.groups()[0].upper()
-            data = _sfx_data(sound)
-            if data:
-                output[audio_count] = data
-                audio_count += 1
 
     return output
 
+def print_standout(text: str):
+    print("="*35)
+    print(text)
+    print("="*35)
+
 def perform_script(script: dict):
-    print("="*35)
-    print(title)
-    print("="*35)
+    print_standout(title)
     for audio_count, data in sorted(script.items()):
-        line = data["content"]
+        line = data.get("content", data.get("img_path"))
         # Get character
         character = data["character"]
         char_name = character
         # Resolve actual character name
-        if character != "[SFX]":
+        if character not in ["[SFX]", "[VISUAL]"]:
             char = characters.get(character, DEFAULT_VOICE)
             if char != DEFAULT_VOICE["name"]: char_name = char["name"]
         
@@ -304,7 +326,7 @@ def export_complete_audio(script: dict, folder_name: str, title: str):
         audio_file_list (list): The list of audio file locations in order of play
         file (str): The location of the file to save the audio to
     """
-    audio_file_list = [data["file"] for _,data in sorted(script.items())]
+    audio_file_list = [data["file"] for _,data in sorted(script.items()) if ".jpg" not in data["file"]]
     # print("\n".join(audio_file_list))
     export_name = f"generated/{folder_name}/{re.sub('[^A-Za-z0-9 ]', '', title)}.mp3"
     combined_audio = pydub.AudioSegment.empty()
@@ -329,10 +351,26 @@ def generate_image(prompt: str, model: int = 2) -> str:
     response = client.images.generate(
         model=f"dall-e-{model}",
         prompt=prompt,
-        size="256x256",
+        size="256x256" if model==2 else "1024x1024",
         n=1
     )
+    # revised_prompt = response.data[0].revised_prompt
     return response.data[0].url
+
+def download_image(url: str, img_path: str):
+    """Download an image to a location
+
+    Args:
+        url (str): The image URL
+        img_path (str): The path to save the image to
+    """    
+    img_data = requests.get(url).content
+    with open(img_path, "wb") as f:
+        f.write(img_data)
+
+def generate_and_save_image(prompt: str, img_path: str, model: str = 2):
+    url = generate_image(prompt, model)
+    download_image(url, img_path)
 
 def generate_script(prompt: str, version: int = 4, compress: bool = True):
     character_prompt = generate_character_strlist()
@@ -341,22 +379,25 @@ def generate_script(prompt: str, version: int = 4, compress: bool = True):
     instruction_text = f"You will write scripts involving some or all of the following characters along with their CHARACTER_NAME variables in brackets:\n{character_prompt}. You will write character dialogue based on the user's prompt. Expand upon the user's prompt by generating a more detailed scenario. The first line of the output will be a title for the script. Do NOT end the story on a happy note unless the user has explicitly asked for it. Do NOT include any stage direction or action."
     # , however, you can also write a detailed description of the visuals that can be passed into an image generator so the audience can see what you're thinking of
 
-    sfx_text = f"You may also use sound effects by using a key value pair delimited by a colon: SFX:SOUND_NAME. 'SFX' is a keyword and SOUND_NAME is an EXACT match to any from this list: [{sfx_prompt}]. ONLY use sound effects where the story calls for them."
-
     format_text = "Each character's dialogue will be on a new line and formatted as a key value pair deliminated by a colon: [CHARACTER_NAME]:[CHARACTER_DIALOGUE]. The CHARACTER_NAME MUST be encapulated by square brackets and be an EXACT match to one previously listed."
-    # \nVisual descriptions will begin with the keyword 'VISUAL'.
+
+    sfx_text = f"You may also use sound effects by using a key value pair delimited by a colon: SFX:SOUND_NAME. 'SFX' is a keyword whereas SOUND_NAME is replaced with an EXACT match to any from this list: [{sfx_prompt}]. ONLY use sound effects where the story calls for them."
+
+    img_text = "You may also generate a LIMITED set of images during the script by using a key value pair delimited by a colon: VISUAL:IMG_PROMPT. 'VISUAL' is a keyword, whereas IMG_PROMPT is to be replaced by a detailed but PG13 description of the scene. Each IMG_PROMPT is STATELESS and MUST describe the scene without relying on other context, meaning any characters used in the IMG_PROMPT MUST have a VISUAL description INSTEAD of their name."
 
     if compress:
         # Disabled instruction compression for now until stability to verified
         # instruction_text = compress_prompt(instruction_text)
         sfx_text = compress_prompt(sfx_text)
         format_text = compress_prompt(format_text)
+        #img_text = compress_prompt(img_text)
 
     return client.chat.completions.create(
         messages=[
             { "role": "system", "content": instruction_text, },
-            { "role": "system", "content": sfx_text, },
             { "role": "system", "content": format_text, },
+            { "role": "system", "content": sfx_text, },
+            { "role": "system", "content": img_text, },
             { "role": "user",   "content": prompt or "make up a random story", }
         ],
         model="gpt-4-turbo-preview" if version == 4 else "gpt-3.5-turbo",
@@ -415,16 +456,16 @@ characters = {
     #         "voice": get_el_voice("onwK4e9ZLuTAKqWW03F9", style=0) # ElevenLabs Daniel
     #     }
     # },
-    "MIMI": {
-        "name": "Mimi",
-        "description": "an overly positive girl that everyone hates because she sounds like a tiktok influencer. She always shouts in CAPITAL LETTERS and an exclamation point!",
-        "voice": {
-            # "source": "EL",
-            # "voice": get_el_voice("zrHiDhphv9ZnVXBqCLjz", style=0)
-            "source": "OV",
-            "voice": "EL_MIMI"
-        }
-    },
+    # "MIMI": {
+    #     "name": "Mimi",
+    #     "description": "an overly positive girl that everyone hates because she sounds like a tiktok influencer. She always shouts in CAPITAL LETTERS and an exclamation point!",
+    #     "voice": {
+    #         # "source": "EL",
+    #         # "voice": get_el_voice("zrHiDhphv9ZnVXBqCLjz", style=0)
+    #         "source": "OV",
+    #         "voice": "EL_MIMI"
+    #     }
+    # },
     "JESSE": {
         "name": "Jesse Pinkman",
         "description": "from Breaking Bad",
@@ -482,6 +523,7 @@ sfx = [
 
 pattern_dialog = re.compile(r"\[(.+?)(?:,.*)?\]:\s?\[?(.+)\]?")
 pattern_sfx = re.compile(r"\[?SFX\]?:\s?\[?(.+)\]?")
+pattern_img = re.compile(r"\[?VISUAL\]?:\s?\[?(.+)\]?")
 
 with open('openai.key', 'r') as file:
     oai_key = file.read().rstrip()
@@ -489,7 +531,7 @@ with open('openai.key', 'r') as file:
 with open('elevenlabs.key', 'r') as file:
     el_key = file.read().rstrip()
 
-set_api_key(el_key)
+# set_api_key(el_key)
 
 client = OpenAI(
     # This is the default and can be omitted
@@ -510,6 +552,7 @@ if args.script is None:
         content = chunk.choices[0].delta.content
         if content is not None:
             generated_output += content
+            pbar.set_postfix_str(f"generated {len(generated_output.split("\n"))} lines")
             pbar.update()
     pbar.close()
     # generated_output = output.choices[0].message.content
@@ -521,6 +564,8 @@ else:
 
 title = generated_output[0].replace("Title: ", "")
 folder_name = title
+
+print_standout(title)
 
 # Create save location & save script, prompt
 if args.script is None:
@@ -534,9 +579,9 @@ generated_output = generated_output[1:]
 print("Processing script...")
 script = preprocess_output_lines(generated_output)
 
-print("Generating audio...")
-# Generate audio in parallel for speed
-process_map(process_line_generate_voice_dialog, script.values(), max_workers=6, unit=" files")
+print("Generating media...")
+# Generate media in parallel for speed
+process_map(process_line_to_generate, script.values(), max_workers=6, unit=" files")
 
 print("Exporting compiled file...")
 export_complete_audio(script, folder_name, title)
