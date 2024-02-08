@@ -448,7 +448,7 @@ characters = {
 }
 
 sfx = [
-    "KEYBOARD_TYPING",
+    "FURIOUS_KEYBOARD_TYPING",
     "GNOME",
     "METAL_PIPE_CRASH",
     "DOOR_CLOSE",
