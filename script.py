@@ -215,8 +215,10 @@ def perform_script(script: dict):
         character = data["character"]
         char_name = character
         # Resolve actual character name
-        if character != "[SFX]": char_name = characters[character]["name"]
-
+        if character != "[SFX]":
+            char = characters.get(character, DEFAULT_VOICE)
+            if char != DEFAULT_VOICE["name"]: char_name = char["name"]
+        
         audio_file_name = data["file"]
         print(f"{audio_count:03} - {char_name}: {line}")
         if os.path.exists(audio_file_name): # Play existing audio file
@@ -361,6 +363,7 @@ if args.script:
         args.script = f"generated/{args.script}/script.txt"
 
 DEFAULT_VOICE = {
+    "name": "DEFAULT",
     "voice": {
         #"source": "EL",
         #"voice": get_voice("onwK4e9ZLuTAKqWW03F9", style=0) # Daniel
