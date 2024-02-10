@@ -7,7 +7,7 @@ from openai import OpenAI
 import argparse
 import pydub
 from tqdm import tqdm
-from tqdm.contrib.concurrent import process_map
+from tqdm.contrib.concurrent import thread_map, process_map
 import subprocess
 import requests
 import gptrim, nltk # prompt compression
@@ -25,9 +25,11 @@ def parse_args():
     parser.add_argument("-s", "--script", type=str, default=None, help="The location of the script to generate/read")
     parser.add_argument("-p", "--prompt", type=str, default=None, help="The prompt to generate the scene")
     parser.add_argument("-f", "--file_only", action="store_true", help="Whether the audio playback should be skipped")
-    parser.add_argument("--gptversion", type=int, default=4, choices=[3,4], help="The version of GPT to use")
+    parser.add_argument("--gptversion", type=int, default=3, choices=[3,4], help="The version of GPT to use")
     parser.add_argument("-c", "--nocompression", action="store_true", help="Disable instruction prompt compression")
     parser.add_argument("-i", "--dallever", type=int, default=2, choices=[2,3], help="Which version of DALL-E to use to generate visuals")
+    parser.add_argument("--list", action="store_true", help="List all defined characters")
+    parser.add_argument("--imagelimit", type=int, default=0, help="The limit of how many images to draw per script")
     return parser.parse_args()
 
 def create_folder(folder_path: str):
@@ -105,10 +107,9 @@ def generate_ov_audio(voice: str, dialog: str, file: str):
         "voice": voice,
         "text": dialog
     })
-    if response.status_code == 201:
+    if response.status_code == 200:
         with open(file, mode="wb") as f:
-            for chunk in response.iter_content(chunk_size=512):
-                f.write(chunk)
+            f.write(response.content)
     else:
         print(f"Got {response.status_code} - Failed to generate: {voice} - {dialog}")
 
@@ -145,9 +146,12 @@ def process_line_to_generate(line: dict):
     content = line["content"]
     character = line["character"]
 
+    prompt = "A realistic image of "
+    prompt += content
+
     if character == "[VISUAL]":
         if not os.path.exists(file_name):
-            generate_and_save_image(content, file_name, args.dallever)
+            generate_and_save_image(prompt, file_name, args.dallever)
     elif character != "[SFX]": # do not attempt to generate sound effect
         voice = characters.get(character, DEFAULT_VOICE)["voice"]
         # Generate if file does not already exist
@@ -181,7 +185,7 @@ def preprocess_output_lines(lines: str) -> dict:
     for line in tqdm(lines, total=len(lines), unit=" lines"):
         # Find matches
         match_dialog = pattern_dialog.match(line)
-        match_sfx = pattern_sfx.match(line) # TODO: Improve SFX matching
+        match_sfx = pattern_sfx.match(line)
         match_img = pattern_img.match(line)
 
         if match_sfx: # Add sound effect
@@ -191,7 +195,9 @@ def preprocess_output_lines(lines: str) -> dict:
                 output[line_count] = data
                 line_count += 1
         elif match_img: # Add image
+            if img_count >= args.imagelimit: continue
             img_prompt = match_img.groups()[0]
+            img_prompt = img_prompt.replace("]","")
             output[line_count] = {
                 "character": "[VISUAL]",
                 "content": img_prompt,
@@ -203,13 +209,7 @@ def preprocess_output_lines(lines: str) -> dict:
             character, dialog = match_dialog.groups()
             dialog = strip_stage_directions(dialog) # Remove stage direction if present
             dialog = dialog.strip() # strip whitespace
-
-            # if character == "SFX": # Sometimes GPT fails the formatting, so filter out SFX
-            #     data = _sfx_data(dialog)
-            #     if data:
-            #         output[line_count] = data
-            #         line_count += 1
-            #     continue # stop further processing of dialog
+            character = character.upper()
 
             audio_file_name = get_voice_audio_file_name(voice_count, character)
 
@@ -372,35 +372,47 @@ def generate_and_save_image(prompt: str, img_path: str, model: str = 2):
     url = generate_image(prompt, model)
     download_image(url, img_path)
 
-def generate_script(prompt: str, version: int = 4, compress: bool = True):
+def dialog_regex_pattern() -> str:
+    """A pattern to match characters encapulated in square brackets, or a known character name that isn't in square brackets
+
+    Returns:
+        str: The regex pattern
+    """    
+    chars = "|".join(characters.keys())
+    return fr"(?:(?:\[(.+)(?:,.*)?\])|({chars})):\s+?\[?(.*)\]?"
+
+def generate_script(prompt: str, version: int = 4, compress: bool = True, use_images: bool = True):
     character_prompt = generate_character_strlist()
     sfx_prompt = generate_sfx_strlist()
 
-    instruction_text = f"You will write scripts involving some or all of the following characters along with their CHARACTER_NAME variables in brackets:\n{character_prompt}. You will write character dialogue based on the user's prompt. Expand upon the user's prompt by generating a more detailed scenario. The first line of the output will be a title for the script. Do NOT end the story on a happy note unless the user has explicitly asked for it. Do NOT include any stage direction or action."
+    instruction_text = f"You will write scripts involving some or all of the following characters along with their CHARACTER_NAME variables in brackets:\n{character_prompt}. You will write character dialogue based on the user's prompt. Expand upon the user's prompt by generating a more detailed scenario. ONLY the first line of the output will be the title for the script. Do NOT end the story on a happy note unless the user has explicitly asked for it. Do NOT include any stage direction or action."
     # , however, you can also write a detailed description of the visuals that can be passed into an image generator so the audience can see what you're thinking of
 
-    format_text = "Each character's dialogue will be on a new line and formatted as a key value pair deliminated by a colon: [CHARACTER_NAME]:[CHARACTER_DIALOGUE]. The CHARACTER_NAME MUST be encapulated by square brackets and be an EXACT match to one previously listed."
+    format_text = "Each character's dialogue will be on a new line and formatted as a key value pair on the same line and deliminated by a colon: [${CHARACTER_NAME}]:${CHARACTER_DIALOGUE}. The [CHARACTER_NAME] MUST be encapulated by square brackets and be an EXACT match to one previously listed."
 
-    sfx_text = f"You may also use sound effects by using a key value pair delimited by a colon: SFX:SOUND_NAME. 'SFX' is a keyword whereas SOUND_NAME is replaced with an EXACT match to any from this list: [{sfx_prompt}]. ONLY use sound effects where the story calls for them."
+    sfx_text = f"You may also use sound effects by using a key value pair delimited by a colon: SFX:${{SOUND_NAME}}. 'SFX' is a keyword whereas SOUND_NAME is replaced with an EXACT match to any from this list: [{sfx_prompt}]. ONLY use sound effects where the story calls for them."
 
-    img_text = "You may also generate a LIMITED set of images during the script by using a key value pair delimited by a colon: VISUAL:IMG_PROMPT. 'VISUAL' is a keyword, whereas IMG_PROMPT is to be replaced by a detailed but PG13 description of the scene. Each IMG_PROMPT is STATELESS and MUST describe the scene without relying on other context, meaning any characters used in the IMG_PROMPT MUST have a VISUAL description INSTEAD of their name."
+    img_text = "You may also generate an image during the script by using a key value pair delimited by a colon: VISUAL:${IMG_PROMPT}. 'VISUAL' is a keyword, whereas IMG_PROMPT is to be replaced by a detailed but PG13 description of the scene. Each IMG_PROMPT is STATELESS and MUST describe the scene without relying on other context, meaning any characters used in the IMG_PROMPT MUST have a VISUAL description INSTEAD of their name. The visual is NOT a replacement for dialog - it MUST serve ONLY as an additional aid."
 
     if compress:
         # Disabled instruction compression for now until stability to verified
         # instruction_text = compress_prompt(instruction_text)
         sfx_text = compress_prompt(sfx_text)
         format_text = compress_prompt(format_text)
-        #img_text = compress_prompt(img_text)
+        # if use_images: img_text = compress_prompt(img_text)
+
+    messages = []
+    
+    messages.append({ "role": "system", "content": instruction_text, })
+    messages.append({ "role": "system", "content": format_text, })
+    messages.append({ "role": "system", "content": sfx_text, })
+    if use_images:
+        messages.append({ "role": "system", "content": img_text, })
+    messages.append({ "role": "user",   "content": prompt or "make up a random story", })
 
     return client.chat.completions.create(
-        messages=[
-            { "role": "system", "content": instruction_text, },
-            { "role": "system", "content": format_text, },
-            { "role": "system", "content": sfx_text, },
-            { "role": "system", "content": img_text, },
-            { "role": "user",   "content": prompt or "make up a random story", }
-        ],
-        model="gpt-4-turbo-preview" if version == 4 else "gpt-3.5-turbo",
+        messages=messages,
+        model="gpt-4-turbo-preview" if version == 4 else "gpt-3.5-turbo-0125",
         stream=True,
     )
 
@@ -496,7 +508,7 @@ characters = {
     # },
     "NEIL": {
         "name": "Neil deGrasse Tyson",
-        "description": "a popular scientist that can't stop talking",
+        "description": "a popular, respected, African-American scientist that can't stop talking",
         "voice": {
             "source": "OV",
             "voice": "GRASSMAN"
@@ -509,6 +521,7 @@ sfx = [
     "DOOR_OPEN",
     "DOOR_SMASH_BREAK",
     "AUTOMATIC_GUN_FIRE",
+    "PISTOL_SINGLE_FIRE",
     "BIG_GLASS_SMASH",
     "GLASS_SHATTER",
     #"MAGIC_SPARKLES",
@@ -517,11 +530,20 @@ sfx = [
     #"FBI_OPEN_UP",
     #"AMOGUS_MUSIC_BASS_BOOSTED",
     #"FURIOUS_KEYBOARD_TYPING",
-    #"GNOME",
+    "GNOME",
     #"METAL_PIPE_CRASH",
 ]
 
-pattern_dialog = re.compile(r"\[(.+?)(?:,.*)?\]:\s?\[?(.+)\]?")
+# List characters and nothing else
+if args.list:
+    print_standout("Characters")
+    for id, data in characters.items():
+        name = data["name"]
+        desc = data["description"]
+        print(f"{name} ({id}) - {desc}")
+    exit(0)
+
+pattern_dialog = re.compile(r"\[?(.+?)\]?:\s*\[?(.*)\]?")
 pattern_sfx = re.compile(r"\[?SFX\]?:\s?\[?(.+)\]?")
 pattern_img = re.compile(r"\[?VISUAL\]?:\s?\[?(.+)\]?")
 
@@ -545,7 +567,7 @@ if args.script is None:
         user_prompt = input("Prompt: ")
     
     print("Generating script...")
-    output_stream = generate_script(user_prompt, args.gptversion, not args.nocompression)
+    output_stream = generate_script(user_prompt, args.gptversion, not args.nocompression, args.imagelimit > 0)
     generated_output = ""
     pbar = tqdm(unit=" chunks", desc="Generating using GPT")
     for chunk in output_stream:
@@ -562,7 +584,8 @@ else:
         generated_output = [line.strip() for line in f]
     
 
-title = generated_output[0].replace("Title: ", "")
+title = generated_output[0].split(":")[-1].strip()
+title = re.sub(r"[^A-Za-z0-9 \-:]", "", title)
 folder_name = title
 
 print_standout(title)
