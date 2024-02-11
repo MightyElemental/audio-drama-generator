@@ -30,6 +30,7 @@ def parse_args():
     parser.add_argument("-i", "--dallever", type=int, default=2, choices=[2,3], help="Which version of DALL-E to use to generate visuals")
     parser.add_argument("--list", action="store_true", help="List all defined characters")
     parser.add_argument("--imagelimit", type=int, default=0, help="The limit of how many images to draw per script")
+    parser.add_argument("--passes", type=int, default=1, help="How many times to prompt GPT (more passes makes a longer story)")
     return parser.parse_args()
 
 def create_folder(folder_path: str):
@@ -381,11 +382,11 @@ def dialog_regex_pattern() -> str:
     chars = "|".join(characters.keys())
     return fr"(?:(?:\[(.+)(?:,.*)?\])|({chars})):\s+?\[?(.*)\]?"
 
-def generate_script(prompt: str, version: int = 4, compress: bool = True, use_images: bool = True):
+def construct_gpt_prompt(init_prompt: str, compress: bool = True, use_images: bool = True) -> list:
     character_prompt = generate_character_strlist()
     sfx_prompt = generate_sfx_strlist()
 
-    instruction_text = f"You will write scripts involving some or all of the following characters along with their CHARACTER_NAME variables in brackets:\n{character_prompt}. You will write character dialogue based on the user's prompt. Expand upon the user's prompt by generating a more detailed scenario. ONLY the first line of the output will be the title for the script. Do NOT end the story on a happy note unless the user has explicitly asked for it. Do NOT include any stage direction or action."
+    instruction_text = f"You will write scripts involving some or all of the following characters along with their CHARACTER_NAME variables in brackets:\n{character_prompt}. You will write character dialogue based on the user's prompt. Expand upon the user's prompt by generating a more detailed scenario. ONLY the first line of the output will be the title for the script. Do NOT end the story on a happy note unless the user has explicitly asked for it. Do NOT include any stage direction or action. If you receive a script, continue it where it leaves off."
     # , however, you can also write a detailed description of the visuals that can be passed into an image generator so the audience can see what you're thinking of
 
     format_text = "Each character's dialogue will be on a new line and formatted as a key value pair on the same line and deliminated by a colon: [${CHARACTER_NAME}]:${CHARACTER_DIALOGUE}. The [CHARACTER_NAME] MUST be encapulated by square brackets and be an EXACT match to one previously listed."
@@ -408,12 +409,16 @@ def generate_script(prompt: str, version: int = 4, compress: bool = True, use_im
     messages.append({ "role": "system", "content": sfx_text, })
     if use_images:
         messages.append({ "role": "system", "content": img_text, })
-    messages.append({ "role": "user",   "content": prompt or "make up a random story", })
+    messages.append({ "role": "user", "content": init_prompt or "make up a random story", })        
 
+    return messages
+
+def generate_script(messages: list, version: int = 4):
     return client.chat.completions.create(
         messages=messages,
         model="gpt-4-turbo-preview" if version == 4 else "gpt-3.5-turbo-0125",
         stream=True,
+        max_tokens=4095,
     )
 
 args = parse_args()
@@ -567,16 +572,25 @@ if args.script is None:
         user_prompt = input("Prompt: ")
     
     print("Generating script...")
-    output_stream = generate_script(user_prompt, args.gptversion, not args.nocompression, args.imagelimit > 0)
+
+    messages = construct_gpt_prompt(user_prompt, not args.nocompression, args.imagelimit > 0)
+
     generated_output = ""
-    pbar = tqdm(unit=" chunks", desc="Generating using GPT")
-    for chunk in output_stream:
-        content = chunk.choices[0].delta.content
-        if content is not None:
-            generated_output += content
-            pbar.set_postfix_str(f"generated {len(generated_output.split("\n"))} lines")
-            pbar.update()
-    pbar.close()
+
+    for _ in tqdm(range(args.passes), desc="passes", unit=" pass"):
+        output_stream = generate_script(messages, args.gptversion)
+        go = ""
+        pbar = tqdm(unit=" chunks", desc="Generating using GPT")
+        for chunk in output_stream:
+            content = chunk.choices[0].delta.content
+            if content is not None:
+                go += content
+                pbar.set_postfix_str(f"generated {len(go.split("\n"))} lines")
+                pbar.update()
+        pbar.close()
+        messages.append({ "role": "assistant", "content": go, })
+        messages.append({ "role": "user", "content": "continue the script", }) # TODO: Further test the continuation prompt. Add compression?
+        generated_output += f"{go}\n"
     # generated_output = output.choices[0].message.content
     generated_output = generated_output.split("\n")
 else:
@@ -613,36 +627,3 @@ if not args.file_only:
     print("Performing...")
     perform_script(script)
 
-# for line in generated_output:
-#     match_dialog = pattern_dialog.match(line)
-#     match_sfx = pattern_sfx.match(line)
-#     print(f"{audio_count:03} - {line}")
-#     if match_dialog:
-#         character, dialog = match_dialog.groups()
-#         dialog = strip_stage_directions(dialog) # Remove stage direction if present
-
-#         if character == "SFX":
-#             audio_file_name = soundfx(dialog)
-#             if audio_file_name: audio_file_list.append(audio_file_name)
-#             continue
-
-#         voice = characters.get(character, DEFAULT_VOICE)["voice"]
-
-#         audio_file_name = get_voice_audio_file_name(audio_count, character)
-
-#         # Increase count
-#         audio_count += 1
-
-#         # Add the audio for contat
-#         audio_file_list.append(audio_file_name)
-        
-#         # Play / Generate
-#         if os.path.exists(audio_file_name): # Play existing audio file
-#             if not args.file_only: playsound.playsound(audio_file_name)
-#         else:
-#             generate_voice_audio(voice, dialog, audio_file_name)
-        
-#     elif match_sfx:
-#         sound = match_sfx.groups()[0].upper()
-#         audio_file_name = soundfx(sound)
-#         if audio_file_name: audio_file_list.append(audio_file_name)
