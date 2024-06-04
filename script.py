@@ -13,8 +13,8 @@ import requests
 import gptrim, nltk # prompt compression
 # import multiprocessing
 
-from elevenlabs import set_api_key
-from elevenlabs import generate, stream, save
+from elevenlabs.client import ElevenLabs
+from elevenlabs import stream, save
 from elevenlabs import Voice, VoiceSettings
 
 # This requires a custom OpenVoice API
@@ -24,13 +24,15 @@ def parse_args():
     parser = argparse.ArgumentParser(description="", formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument("-s", "--script", type=str, default=None, help="The location of the script to generate/read")
     parser.add_argument("-p", "--prompt", type=str, default=None, help="The prompt to generate the scene")
-    parser.add_argument("-f", "--file_only", action="store_true", help="Whether the audio playback should be skipped")
-    parser.add_argument("--gptversion", type=int, default=3, choices=[3,4], help="The version of GPT to use")
+    parser.add_argument("--noplayback", action="store_true", help="Whether the audio playback should be skipped")
+    parser.add_argument("--scriptonly", action="store_true", help="Whether the audio generation should be skipped")
+    parser.add_argument("--gptversion", type=int, default=4, choices=[3,4], help="The version of GPT to use")
     parser.add_argument("-c", "--nocompression", action="store_true", help="Disable instruction prompt compression")
     parser.add_argument("-i", "--dallever", type=int, default=2, choices=[2,3], help="Which version of DALL-E to use to generate visuals")
     parser.add_argument("--list", action="store_true", help="List all defined characters")
     parser.add_argument("--imagelimit", type=int, default=0, help="The limit of how many images to draw per script")
     parser.add_argument("--passes", type=int, default=1, help="How many times to prompt GPT (more passes makes a longer story)")
+    parser.add_argument("-w", "--workers", type=int, default=2, help="How many worker threads to use when generating audio samples")
     return parser.parse_args()
 
 def create_folder(folder_path: str):
@@ -62,7 +64,7 @@ def generate_el_audio_data(voice: Voice, text: str, stream: bool = False):
     Returns:
         bytes | Iterator[bytes]: The complete audio data or a data iterator for streams
     """    
-    return generate(
+    return el_client.generate(
         text=text,
         voice=voice,
         #model="eleven_turbo_v2",
@@ -409,14 +411,14 @@ def construct_gpt_prompt(init_prompt: str, compress: bool = True, use_images: bo
     messages.append({ "role": "system", "content": sfx_text, })
     if use_images:
         messages.append({ "role": "system", "content": img_text, })
-    messages.append({ "role": "user", "content": init_prompt or "make up a random story", })        
+    messages.append({ "role": "user", "content": init_prompt or "make up a random story", })
 
     return messages
 
 def generate_script(messages: list, version: int = 4):
     return client.chat.completions.create(
         messages=messages,
-        model="gpt-4-turbo-preview" if version == 4 else "gpt-3.5-turbo-0125",
+        model="gpt-4o" if version == 4 else "gpt-3.5-turbo",
         stream=True,
         max_tokens=4095,
     )
@@ -522,20 +524,20 @@ characters = {
 }
 
 sfx = [
-    "DOOR_CLOSE",
-    "DOOR_OPEN",
-    "DOOR_SMASH_BREAK",
-    "AUTOMATIC_GUN_FIRE",
-    "PISTOL_SINGLE_FIRE",
-    "BIG_GLASS_SMASH",
-    "GLASS_SHATTER",
+    # "DOOR_CLOSE",
+    # "DOOR_OPEN",
+    # "DOOR_SMASH_BREAK",
+    # "AUTOMATIC_GUN_FIRE",
+    # "PISTOL_SINGLE_FIRE",
+    # "BIG_GLASS_SMASH",
+    # "GLASS_SHATTER",
     #"MAGIC_SPARKLES",
     #"GOOFY_CAR_HORN",
     #"BAD_TO_THE_BONE_FUNNY",
     #"FBI_OPEN_UP",
     #"AMOGUS_MUSIC_BASS_BOOSTED",
     #"FURIOUS_KEYBOARD_TYPING",
-    "GNOME",
+    # "GNOME",
     #"METAL_PIPE_CRASH",
 ]
 
@@ -558,7 +560,10 @@ with open('openai.key', 'r') as file:
 with open('elevenlabs.key', 'r') as file:
     el_key = file.read().rstrip()
 
-# set_api_key(el_key)
+
+el_client = ElevenLabs(
+    api_key=el_key
+)
 
 client = OpenAI(
     # This is the default and can be omitted
@@ -610,6 +615,9 @@ if args.script is None:
     save_list(generated_output, f"generated/{folder_name}/script.txt")
     save_list([user_prompt], f"generated/{folder_name}/prompt.txt")
 
+# Stop before audio generation
+if args.scriptonly: exit(0)
+
 # Remove title
 generated_output = generated_output[1:]
 
@@ -618,12 +626,12 @@ script = preprocess_output_lines(generated_output)
 
 print("Generating media...")
 # Generate media in parallel for speed
-process_map(process_line_to_generate, script.values(), max_workers=6, unit=" files")
+process_map(process_line_to_generate, script.values(), max_workers=args.workers, unit=" files")
 
 print("Exporting compiled file...")
 export_complete_audio(script, folder_name, title)
 
-if not args.file_only:
+if not args.noplayback:
     print("Performing...")
     perform_script(script)
 
