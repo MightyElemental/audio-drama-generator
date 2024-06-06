@@ -1,5 +1,7 @@
 # Secrets
 *.key
+/characters_media.csv
+/characters_real2.csv
 
 # Folders
 sfx/

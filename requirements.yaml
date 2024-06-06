@@ -9,6 +9,7 @@ dependencies:
     - pip
     - pyparsing
     - pydub
+    - pandas
     - pip:
         - openai
         - elevenlabs

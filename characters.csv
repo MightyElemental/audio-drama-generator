@@ -1,0 +1,6 @@
+character_identifier,displayed_name,description,voice_source,voice_id,voice_style,voice_similarity,voice_stability,note
+FERGUS,Fergus,"a posh, British, university student who likes to belittle people.",OAI,fable,,,,
+DAN,Daniel,a creepy man who only speaks in innuendos,EL,Yko7PKHZNXotIFUBG7I9,0,,,ElevenLabs Matt
+BARRY,Barry,a manic depressive,EL,onwK4e9ZLuTAKqWW03F9,0,,,ElevenLabs Daniel
+MIMI,Mimi,an overly positive girl that everyone hates because she sounds like a tiktok influencer. She always shouts in CAPITAL LETTERS and an exclamation point!,EL,zrHiDhphv9ZnVXBqCLjz,0,,,ElevenLabs Mimi
+SANDRA,Sandra,a weird girl that enjoys cereal to a disturbing degree,OAI,nova,,,,

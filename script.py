@@ -3,11 +3,13 @@
 import re
 import os
 import playsound
+import pandas
+import glob
 from openai import OpenAI
 import argparse
 import pydub
 from tqdm import tqdm
-from tqdm.contrib.concurrent import thread_map, process_map
+from tqdm.contrib.concurrent import process_map
 import subprocess
 import requests
 import gptrim, nltk # prompt compression
@@ -17,7 +19,7 @@ from elevenlabs.client import ElevenLabs
 from elevenlabs import stream, save
 from elevenlabs import Voice, VoiceSettings
 
-# This requires a custom OpenVoice API
+# This requires a custom API
 openvoice_url = "http://localhost:8000/generate"
 
 def parse_args():
@@ -29,10 +31,10 @@ def parse_args():
     parser.add_argument("--gptversion", type=int, default=4, choices=[3,4], help="The version of GPT to use")
     parser.add_argument("-c", "--nocompression", action="store_true", help="Disable instruction prompt compression")
     parser.add_argument("-i", "--dallever", type=int, default=2, choices=[2,3], help="Which version of DALL-E to use to generate visuals")
-    parser.add_argument("--list", action="store_true", help="List all defined characters")
     parser.add_argument("--imagelimit", type=int, default=0, help="The limit of how many images to draw per script")
     parser.add_argument("--passes", type=int, default=1, help="How many times to prompt GPT (more passes makes a longer story)")
     parser.add_argument("-w", "--workers", type=int, default=2, help="How many worker threads to use when generating audio samples")
+    parser.add_argument("--characters", type=str, nargs="+", required=True, help="A list of the characters you wish to use. Use LIST to see available characters.")
     return parser.parse_args()
 
 def create_folder(folder_path: str):
@@ -131,7 +133,7 @@ def get_output_folder():
 
 def get_voice_audio_file_name(audio_count: int, character: str) -> str:
     audio_file_name = f"{get_output_folder()}/{audio_count:03} - {character}"
-    voice = characters.get(character, DEFAULT_VOICE)["voice"]
+    voice = active_characters.get(character, DEFAULT_VOICE)["voice"]
     # Select correct file type
     if voice["source"] in ["EL", "OAI"]: # ElevenLabs
         audio_file_name += ".mp3"
@@ -156,7 +158,7 @@ def process_line_to_generate(line: dict):
         if not os.path.exists(file_name):
             generate_and_save_image(prompt, file_name, args.dallever)
     elif character != "[SFX]": # do not attempt to generate sound effect
-        voice = characters.get(character, DEFAULT_VOICE)["voice"]
+        voice = active_characters.get(character, DEFAULT_VOICE)["voice"]
         # Generate if file does not already exist
         if not os.path.exists(file_name):
             generate_voice_audio(voice, content, file_name)
@@ -241,7 +243,7 @@ def perform_script(script: dict):
         char_name = character
         # Resolve actual character name
         if character not in ["[SFX]", "[VISUAL]"]:
-            char = characters.get(character, DEFAULT_VOICE)
+            char = active_characters.get(character, DEFAULT_VOICE)
             if char != DEFAULT_VOICE["name"]: char_name = char["name"]
         
         audio_file_name = data["file"]
@@ -250,9 +252,9 @@ def perform_script(script: dict):
             playsound.playsound(audio_file_name)
 
 def generate_character_strlist():
-    global characters
+    global active_characters
     prompt = ""
-    for i, (key, details) in enumerate(characters.items(), 1):
+    for i, (key, details) in enumerate(active_characters.items(), 1):
         prompt += f"{i}. {details["name"]} ({key}) {details["description"]}\n"
     return prompt
 
@@ -381,7 +383,7 @@ def dialog_regex_pattern() -> str:
     Returns:
         str: The regex pattern
     """    
-    chars = "|".join(characters.keys())
+    chars = "|".join(active_characters.keys())
     return fr"(?:(?:\[(.+)(?:,.*)?\])|({chars})):\s+?\[?(.*)\]?"
 
 def construct_gpt_prompt(init_prompt: str, compress: bool = True, use_images: bool = True) -> list:
@@ -423,6 +425,58 @@ def generate_script(messages: list, version: int = 4):
         max_tokens=4095,
     )
 
+def get_character_files() -> list[str]:
+    folder_path = os.path.dirname(__file__)
+    pattern = os.path.join(folder_path, 'characters*.csv')
+    return glob.glob(pattern)
+
+def get_character_dict(char_files: list[str]) -> dict:
+    frames = []
+    for path in char_files:
+        df = pandas.read_csv(path)
+        frames.append(df)
+    return parse_character_file(pandas.concat(frames, ignore_index=True))
+
+def parse_character_file(df: pandas.DataFrame) -> dict:
+    result = {}
+    # Fill blank spaces with default values
+    df.fillna({"voice_style": 0.1}, inplace=True)
+    df.fillna({"voice_similarity": 0.75}, inplace=True)
+    df.fillna({"voice_stability": 0.5}, inplace=True)
+
+    for _, row in df.iterrows():
+        voice_id = row["voice_id"]
+        voice_source = row["voice_source"]
+        # ElevenLabs requires different processing
+        if voice_source == "EL":
+            style = row["voice_style"]
+            similarity = row["voice_similarity"]
+            stability = row["voice_stability"]
+            voice_id = get_el_voice(voice_id, stability, similarity, style)
+
+        # store character
+        result[row["character_identifier"]] = {
+            "name": row["displayed_name"],
+            "description": row["description"],
+            "voice": {
+                "source": voice_source,
+                "voice": voice_id,
+            }
+        }
+    return result
+
+def get_active_characters(characters: dict, selected: list) -> dict:
+    result = {}
+    for char, value in characters.items():
+        if char in selected:
+            result[char] = value
+            selected.remove(char)
+
+    if len(selected) > 0:
+        print("\nFollowing characters do not exist: [", ", ".join(selected), "]")
+
+    return result
+
 args = parse_args()
 
 # Fill out full file path for script name only entries
@@ -440,88 +494,21 @@ DEFAULT_VOICE = {
     }
 }
 
-characters = {
-    # "FERGUS": {
-    #     "name": "Fergus",
-    #     "description": "a posh, British, university student who likes to belittle people.",
-    #     "voice": {
-    #         # "source": "OAI",
-    #         # "voice": "fable",
-    #         "source": "OV",
-    #         "voice": "OAI_FABLE"
-    #     }
-    # },
-    # "WALTER": {
-    #     "name": "Walter White",
-    #     "description": "a father and drug manufacturer from the show Breaking Bad",
-    #     "voice": {
-    #         "source": "OV",
-    #         "voice": "WALTER"
-    #     }
-    # },
-    # "DAN": {
-    #     "name": "Daniel",
-    #     "description": "a creepy man who only speaks in disgusting innuendos",
-    #     "voice": {
-    #         "source": "EL",
-    #         "voice": get_el_voice("Yko7PKHZNXotIFUBG7I9", style=0) # ElevenLabs Matt
-    #     }
-    # },
-    # "BARRY": {
-    #     "name": "Barry",
-    #     "description": "a manic depressive",
-    #     "voice": {
-    #         "source": "EL",
-    #         "voice": get_el_voice("onwK4e9ZLuTAKqWW03F9", style=0) # ElevenLabs Daniel
-    #     }
-    # },
-    # "MIMI": {
-    #     "name": "Mimi",
-    #     "description": "an overly positive girl that everyone hates because she sounds like a tiktok influencer. She always shouts in CAPITAL LETTERS and an exclamation point!",
-    #     "voice": {
-    #         # "source": "EL",
-    #         # "voice": get_el_voice("zrHiDhphv9ZnVXBqCLjz", style=0)
-    #         "source": "OV",
-    #         "voice": "EL_MIMI"
-    #     }
-    # },
-    "JESSE": {
-        "name": "Jesse Pinkman",
-        "description": "from Breaking Bad",
-        "voice": {
-            "source": "OV",
-            "voice": "JESSE"
-        }
-    },
-    "HAWK": {
-        "name": "Steven Hawking",
-        "description": "a super intelligent, wheelchair-bound British man",
-        "voice": {
-            "source": "DT",
-            "voice": 0
-        }
-    },
-    # "SANDRA": {
-    #     "name": "Sandra",
-    #     "description": "a weird girl that enjoys cereal to a disturbing degree",
-    #     "voice": {
-    #         # "source": "DT",
-    #         # "voice": 1
-    #         # "source": "OAI",
-    #         # "voice": "nova"
-    #         "source": "OV",
-    #         "voice": "OAI_NOVA"
-    #     }
-    # },
-    "NEIL": {
-        "name": "Neil deGrasse Tyson",
-        "description": "a popular, respected, African-American scientist that can't stop talking",
-        "voice": {
-            "source": "OV",
-            "voice": "GRASSMAN"
-        }
-    },
-}
+all_characters = get_character_dict(get_character_files())
+
+if args.characters[0] == "LIST":
+    print("\nUseable characters: [")
+    for char, value in all_characters.items():
+        print(f"\t{char} - {value['description']}")
+    print("]")
+    exit(0)
+
+active_characters = get_active_characters(all_characters, args.characters)
+
+if len(active_characters) == 0:
+    raise ValueError("No characters have been selected!")
+else:
+    print("\nUsing following characters: [", ", ".join(active_characters), "]")
 
 sfx = [
     # "DOOR_CLOSE",
@@ -540,15 +527,6 @@ sfx = [
     # "GNOME",
     #"METAL_PIPE_CRASH",
 ]
-
-# List characters and nothing else
-if args.list:
-    print_standout("Characters")
-    for id, data in characters.items():
-        name = data["name"]
-        desc = data["description"]
-        print(f"{name} ({id}) - {desc}")
-    exit(0)
 
 pattern_dialog = re.compile(r"\[?(.+?)\]?:\s*\[?(.*)\]?")
 pattern_sfx = re.compile(r"\[?SFX\]?:\s?\[?(.+)\]?")
