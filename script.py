@@ -2,25 +2,44 @@
 
 import re
 import os
+import subprocess
+import glob
+import argparse
 import playsound
 import pandas
-import glob
 from openai import OpenAI
-import argparse
 import pydub
 from tqdm import tqdm
 from tqdm.contrib.concurrent import process_map
-import subprocess
 import requests
-import gptrim, nltk # prompt compression
+# import gptrim, nltk # prompt compression
 # import multiprocessing
 
 from elevenlabs.client import ElevenLabs
-from elevenlabs import stream, save
+from elevenlabs import save
 from elevenlabs import Voice, VoiceSettings
 
 # This requires a custom API
 openvoice_url = "http://localhost:8000/generate"
+
+GPT_MODELS = {
+    "gpt-4o": {
+        "use_alt_sys_prompt": False,
+        "max_tokens": 16384,
+    },
+    "gpt-4o-mini": {
+        "use_alt_sys_prompt": False,
+        "max_tokens": 16384,
+    },
+    "o1-preview": {
+        "use_alt_sys_prompt": True,
+        "max_tokens": None, # technically 32,768 tokens
+    },
+    "o1-mini": {
+        "use_alt_sys_prompt": True,
+        "max_tokens": None, # technically 65,536 tokens
+    },
+}
 
 def parse_args():
     parser = argparse.ArgumentParser(description="", formatter_class=argparse.ArgumentDefaultsHelpFormatter)
@@ -28,8 +47,8 @@ def parse_args():
     parser.add_argument("-p", "--prompt", type=str, default=None, help="The prompt to generate the scene")
     parser.add_argument("--noplayback", action="store_true", help="Whether the audio playback should be skipped")
     parser.add_argument("--scriptonly", action="store_true", help="Whether the audio generation should be skipped")
-    parser.add_argument("--gptversion", type=int, default=4, choices=[3,4], help="The version of GPT to use")
-    parser.add_argument("-c", "--nocompression", action="store_true", help="Disable instruction prompt compression")
+    parser.add_argument("--model", type=str, default="gpt-4o-mini", choices=list(GPT_MODELS.keys()), help="The version of GPT to use")
+    parser.add_argument("-c", "--compression", action="store_true", help="Enable instruction prompt compression")
     parser.add_argument("-i", "--dallever", type=int, default=2, choices=[2,3], help="Which version of DALL-E to use to generate visuals")
     parser.add_argument("--imagelimit", type=int, default=0, help="The limit of how many images to draw per script")
     parser.add_argument("--passes", type=int, default=1, help="How many times to prompt GPT (more passes makes a longer story)")
@@ -174,7 +193,7 @@ def _sfx_data(sfx_name: str) -> dict | None:
         }
     return output
 
-def preprocess_output_lines(lines: str) -> dict:
+def preprocess_output_lines(lines: list[str]) -> dict:
     """Read script lines and format each line into a dict for further processing
 
     Args:
@@ -200,7 +219,8 @@ def preprocess_output_lines(lines: str) -> dict:
                 output[line_count] = data
                 line_count += 1
         elif match_img: # Add image
-            if img_count >= args.imagelimit: continue
+            if img_count >= args.imagelimit:
+                continue
             img_prompt = match_img.groups()[0]
             img_prompt = img_prompt.replace("]","")
             output[line_count] = {
@@ -373,7 +393,7 @@ def download_image(url: str, img_path: str):
     with open(img_path, "wb") as f:
         f.write(img_data)
 
-def generate_and_save_image(prompt: str, img_path: str, model: str = 2):
+def generate_and_save_image(prompt: str, img_path: str, model: int = 2):
     url = generate_image(prompt, model)
     download_image(url, img_path)
 
@@ -386,11 +406,16 @@ def dialog_regex_pattern() -> str:
     chars = "|".join(active_characters.keys())
     return fr"(?:(?:\[(.+)(?:,.*)?\])|({chars})):\s+?\[?(.*)\]?"
 
-def construct_gpt_prompt(init_prompt: str, compress: bool = True, use_images: bool = True) -> list:
+def construct_gpt_prompt(
+    init_prompt: str,
+    compress: bool = False,
+    use_images: bool = True,
+    use_alt_sys: bool = False,
+    ) -> list:
     character_prompt = generate_character_strlist()
     sfx_prompt = generate_sfx_strlist()
 
-    instruction_text = f"You will write scripts involving some or all of the following characters along with their CHARACTER_NAME variables in brackets:\n{character_prompt}. You will write character dialogue based on the user's prompt. Expand upon the user's prompt by generating a more detailed scenario. ONLY the first line of the output will be the title for the script. Do NOT end the story on a happy note unless the user has explicitly asked for it. Do NOT include any stage direction or action. If you receive a script, continue it where it leaves off."
+    instruction_text = f"You will write a script involving some or all of the following characters along with their CHARACTER_NAME variables in brackets:\n{character_prompt}. You will write character dialogue based on the user's prompt. Expand upon the user's prompt by generating a more detailed scenario. ONLY the first line of the output will be the title for the script. Do NOT end the story on a happy note unless the user has explicitly asked for it. Do NOT include any stage direction or action. If you receive a script, continue it where it leaves off."
     # , however, you can also write a detailed description of the visuals that can be passed into an image generator so the audience can see what you're thinking of
 
     format_text = "Each character's dialogue will be on a new line and formatted as a key value pair on the same line and deliminated by a colon: [${CHARACTER_NAME}]:${CHARACTER_DIALOGUE}. The [CHARACTER_NAME] MUST be encapulated by square brackets and be an EXACT match to one previously listed."
@@ -407,22 +432,26 @@ def construct_gpt_prompt(init_prompt: str, compress: bool = True, use_images: bo
         # if use_images: img_text = compress_prompt(img_text)
 
     messages = []
+
+    # models like o1 cannot use system roles.
+    sys_role = "user" if use_alt_sys else "system"
     
-    messages.append({ "role": "system", "content": instruction_text, })
-    messages.append({ "role": "system", "content": format_text, })
-    messages.append({ "role": "system", "content": sfx_text, })
+    messages.append({ "role": sys_role, "content": instruction_text, })
+    messages.append({ "role": sys_role, "content": format_text, })
+    messages.append({ "role": sys_role, "content": sfx_text, })
     if use_images:
-        messages.append({ "role": "system", "content": img_text, })
+        messages.append({ "role": sys_role, "content": img_text, })
     messages.append({ "role": "user", "content": init_prompt or "make up a random story", })
 
     return messages
 
-def generate_script(messages: list, version: int = 4):
+def generate_script(messages: list, model: str = "gpt-4o-mini"):
+    max_tokens = GPT_MODELS[model]["max_tokens"]
     return client.chat.completions.create(
         messages=messages,
-        model="gpt-4o" if version == 4 else "gpt-3.5-turbo",
+        model=model,
         stream=True,
-        max_tokens=4095,
+        max_completion_tokens=max_tokens,
     )
 
 def get_character_files() -> list[str]:
@@ -445,13 +474,13 @@ def parse_character_file(df: pandas.DataFrame) -> dict:
     df.fillna({"voice_stability": 0.5}, inplace=True)
 
     for _, row in df.iterrows():
-        voice_id = row["voice_id"]
-        voice_source = row["voice_source"]
+        voice_id = str(row["voice_id"])
+        voice_source = str(row["voice_source"])
         # ElevenLabs requires different processing
         if voice_source == "EL":
-            style = row["voice_style"]
-            similarity = row["voice_similarity"]
-            stability = row["voice_stability"]
+            style = float(row["voice_style"])
+            similarity = float(row["voice_similarity"])
+            stability = float(row["voice_stability"])
             voice_id = get_el_voice(voice_id, stability, similarity, style)
 
         # store character
@@ -532,10 +561,10 @@ pattern_dialog = re.compile(r"\[?(.+?)\]?:\s*\[?(.*)\]?")
 pattern_sfx = re.compile(r"\[?SFX\]?:\s?\[?(.+)\]?")
 pattern_img = re.compile(r"\[?VISUAL\]?:\s?\[?(.+)\]?")
 
-with open('openai.key', 'r') as file:
+with open('openai.key', 'r', encoding='utf-8') as file:
     oai_key = file.read().rstrip()
 
-with open('elevenlabs.key', 'r') as file:
+with open('elevenlabs.key', 'r', encoding='utf-8') as file:
     el_key = file.read().rstrip()
 
 
@@ -556,12 +585,20 @@ if args.script is None:
     
     print("Generating script...")
 
-    messages = construct_gpt_prompt(user_prompt, not args.nocompression, args.imagelimit > 0)
+    # models like o1 cannot use the system prompt
+    use_alt_sys_prompt = GPT_MODELS[str(args.model)]["use_alt_sys_prompt"]
+
+    messages = construct_gpt_prompt(
+        init_prompt=user_prompt,
+        compress=args.compression,
+        use_images=args.imagelimit > 0,
+        use_alt_sys=use_alt_sys_prompt,
+    )
 
     generated_output = ""
 
     for _ in tqdm(range(args.passes), desc="passes", unit=" pass"):
-        output_stream = generate_script(messages, args.gptversion)
+        output_stream = generate_script(messages, args.model)
         go = ""
         pbar = tqdm(unit=" chunks", desc="Generating using GPT")
         for chunk in output_stream:
