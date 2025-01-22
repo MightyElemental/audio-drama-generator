@@ -49,7 +49,7 @@ def parse_args():
     parser.add_argument("--scriptonly", action="store_true", help="Whether the audio generation should be skipped")
     parser.add_argument("--model", type=str, default="gpt-4o-mini", choices=list(GPT_MODELS.keys()), help="The version of GPT to use")
     parser.add_argument("-c", "--compression", action="store_true", help="Enable instruction prompt compression")
-    parser.add_argument("-i", "--dallever", type=int, default=2, choices=[2,3], help="Which version of DALL-E to use to generate visuals")
+    parser.add_argument("-i", "--dallever", type=int, default=3, choices=[2,3], help="Which version of DALL-E to use to generate visuals")
     parser.add_argument("--imagelimit", type=int, default=0, help="The limit of how many images to draw per script")
     parser.add_argument("--passes", type=int, default=1, help="How many times to prompt GPT (more passes makes a longer story)")
     parser.add_argument("-w", "--workers", type=int, default=2, help="How many worker threads to use when generating audio samples")
@@ -84,7 +84,7 @@ def generate_el_audio_data(voice: Voice, text: str, stream: bool = False):
 
     Returns:
         bytes | Iterator[bytes]: The complete audio data or a data iterator for streams
-    """    
+    """
     return el_client.generate(
         text=text,
         voice=voice,
@@ -100,12 +100,12 @@ def generate_dectalk_audio(voice: int, dialog: str, file: str):
         voice (int): Which preset voice to use (0-9)
         dialog (str): The text to read out
         file (str): The location of the audio file
-    """ 
+    """
     # TODO: Verify security of calling a command using direct text
     text = re.sub("[^A-Za-z0-9 -.,!?()]", "", dialog)
     folder = os.path.dirname(file)
     create_folder(folder)
-    subprocess.run(["./dectalk/say","-e","1","-s",str(voice),"-a",text,"-fo",file])
+    subprocess.run(["./dectalk/say","-e","1","-s",str(voice),"-a",text,"-fo",file], check=True)
 
 def generate_oai_audio(voice: str, dialog: str):
     """Generates audio data from OpenAI
@@ -117,9 +117,10 @@ def generate_oai_audio(voice: str, dialog: str):
     Returns:
         HttpxBinaryResponseContent: The audio data
     """
-    voices = ["alloy", "echo", "fable", "onyx", "nova", "shimmer"]
-    if voice not in voices: raise Exception(f"Voice {voice} is not an existing model. Pick one of: {voices}")
-    
+    voices = ["alloy", "echo", "fable", "onyx", "nova", "shimmer", "sage", "ash"]
+    if voice not in voices:
+        raise ValueError(f"Voice {voice} is not an existing model. Pick one of: {voices}")
+
     return client.audio.speech.create(
         model = "tts-1",
         voice = voice,
@@ -143,8 +144,8 @@ def save_list(l: list, file: str):
     Args:
         l (list): The list to save
         file (str): The location of the file
-    """    
-    with open(file, "w") as f:
+    """
+    with open(file, "w", encoding="utf-8") as f:
         f.writelines(f"{line}\n" for line in l)
 
 def get_output_folder():
@@ -170,6 +171,9 @@ def process_line_to_generate(line: dict):
     content = line["content"]
     character = line["character"]
 
+    if len(content) < 1:
+        raise ValueError(f"Content is blank for ``{file_name}``!")
+
     prompt = "A realistic image of "
     prompt += content
 
@@ -180,8 +184,11 @@ def process_line_to_generate(line: dict):
         voice = active_characters.get(character, DEFAULT_VOICE)["voice"]
         # Generate if file does not already exist
         if not os.path.exists(file_name):
-            generate_voice_audio(voice, content, file_name)
-        
+            try:
+                generate_voice_audio(voice, content, file_name)
+            except Exception as e:
+                print("Error generating audio:", e)
+
 def _sfx_data(sfx_name: str) -> dict | None:
     output = None
     audio_file_name = soundfx(sfx_name)
@@ -201,7 +208,7 @@ def preprocess_output_lines(lines: list[str]) -> dict:
 
     Returns:
         dict: The data for further processing
-    """    
+    """
     output = {}
     line_count = 0 # audio line count
     voice_count = 0 # voice line count
@@ -231,6 +238,7 @@ def preprocess_output_lines(lines: list[str]) -> dict:
             line_count += 1
             img_count += 1
         elif match_dialog: # Add dialog
+            # TODO: Match case where dialog has notes either side in brackets
             character, dialog = match_dialog.groups()
             dialog = strip_stage_directions(dialog) # Remove stage direction if present
             dialog = dialog.strip() # strip whitespace
@@ -264,22 +272,21 @@ def perform_script(script: dict):
         # Resolve actual character name
         if character not in ["[SFX]", "[VISUAL]"]:
             char = active_characters.get(character, DEFAULT_VOICE)
-            if char != DEFAULT_VOICE["name"]: char_name = char["name"]
-        
+            if char != DEFAULT_VOICE["name"]:
+                char_name = char["name"]
+
         audio_file_name = data["file"]
         print(f"{audio_count:03} - {char_name}: {line}")
         if os.path.exists(audio_file_name): # Play existing audio file
             playsound.playsound(audio_file_name)
 
 def generate_character_strlist():
-    global active_characters
     prompt = ""
     for i, (key, details) in enumerate(active_characters.items(), 1):
         prompt += f"{i}. {details["name"]} ({key}) {details["description"]}\n"
     return prompt
 
 def generate_sfx_strlist():
-    global sfx
     return ",".join(sfx)
 
 def strip_stage_directions(dialog: str) -> str:
@@ -291,7 +298,7 @@ def strip_stage_directions(dialog: str) -> str:
 
     Returns:
         str: The dialog without stage direction
-    """    
+    """
     result = re.sub(r"\(.*\)", "", dialog)
     return re.sub(r"\*.*\*", "", result)
 
@@ -302,7 +309,7 @@ def generate_voice_audio(voice: dict, dialog: str, audio_file_name: str):
         voice (dict): The voice data
         dialog (str): The text to read
         audio_file_name (str): The location of the file to save to
-    """    
+    """
     if voice["source"] == "EL": # Generate using elevenlabs
         data = generate_el_audio_data(voice["voice"], dialog)
         save(data, audio_file_name)
@@ -322,10 +329,11 @@ def soundfx(sound: str) -> str | None:
 
     Returns:
         str | None: The file path, or None if the file was not found
-    """    
+    """
     sound = re.sub(r"[^A-Z_]", "", sound)
     audio_file_name = f"sfx/{sound}.mp3"
-    if not os.path.exists(audio_file_name): return None # return if file not present
+    if not os.path.exists(audio_file_name):
+        return None # return if file not present
     return audio_file_name
 
 def compress_prompt(text: str) -> str:
@@ -337,7 +345,7 @@ def compress_prompt(text: str) -> str:
 
     Returns:
         str: The compressed text
-    """      
+    """
     trimmed = gptrim.trim(text)
     t=nltk.word_tokenize(text)
     tr=nltk.word_tokenize(trimmed)
@@ -371,7 +379,7 @@ def generate_image(prompt: str, model: int = 2) -> str:
 
     Returns:
         str: The URL of the generated image
-    """    
+    """
     if model not in [2,3]: model = 2
     response = client.images.generate(
         model=f"dall-e-{model}",
@@ -388,7 +396,7 @@ def download_image(url: str, img_path: str):
     Args:
         url (str): The image URL
         img_path (str): The path to save the image to
-    """    
+    """
     img_data = requests.get(url).content
     with open(img_path, "wb") as f:
         f.write(img_data)
@@ -402,7 +410,7 @@ def dialog_regex_pattern() -> str:
 
     Returns:
         str: The regex pattern
-    """    
+    """
     chars = "|".join(active_characters.keys())
     return fr"(?:(?:\[(.+)(?:,.*)?\])|({chars})):\s+?\[?(.*)\]?"
 
@@ -415,7 +423,7 @@ def construct_gpt_prompt(
     character_prompt = generate_character_strlist()
     sfx_prompt = generate_sfx_strlist()
 
-    instruction_text = f"You will write a script involving some or all of the following characters along with their CHARACTER_NAME variables in brackets:\n{character_prompt}. You will write character dialogue based on the user's prompt. Expand upon the user's prompt by generating a more detailed scenario. ONLY the first line of the output will be the title for the script. Do NOT end the story on a happy note unless the user has explicitly asked for it. Do NOT include any stage direction or action. If you receive a script, continue it where it leaves off."
+    instruction_text = f"You will write a long script with narrative flow involving some or all of the following characters along with their CHARACTER_NAME variables in brackets:\n{character_prompt}. You will write character dialogue based on the user's prompt. Expand upon the user's prompt by generating a more detailed scenario. ONLY the first line of the output will be the title for the script. Do NOT end the story on a happy note unless the user has explicitly asked for it. Do NOT include any stage direction or action. If you receive a script, continue it where it leaves off."
     # , however, you can also write a detailed description of the visuals that can be passed into an image generator so the audience can see what you're thinking of
 
     format_text = "Each character's dialogue will be on a new line and formatted as a key value pair on the same line and deliminated by a colon: [${CHARACTER_NAME}]:${CHARACTER_DIALOGUE}. The [CHARACTER_NAME] MUST be encapulated by square brackets and be an EXACT match to one previously listed."
@@ -435,7 +443,7 @@ def construct_gpt_prompt(
 
     # models like o1 cannot use system roles.
     sys_role = "user" if use_alt_sys else "system"
-    
+
     messages.append({ "role": sys_role, "content": instruction_text, })
     messages.append({ "role": sys_role, "content": format_text, })
     messages.append({ "role": sys_role, "content": sfx_text, })
@@ -547,14 +555,14 @@ sfx = [
     # "PISTOL_SINGLE_FIRE",
     # "BIG_GLASS_SMASH",
     # "GLASS_SHATTER",
-    #"MAGIC_SPARKLES",
-    #"GOOFY_CAR_HORN",
-    #"BAD_TO_THE_BONE_FUNNY",
-    #"FBI_OPEN_UP",
-    #"AMOGUS_MUSIC_BASS_BOOSTED",
-    #"FURIOUS_KEYBOARD_TYPING",
+    # "MAGIC_SPARKLES",
+    # "GOOFY_CAR_HORN",
+    # "BAD_TO_THE_BONE_FUNNY",
+    # "FBI_OPEN_UP",
+    # "AMOGUS_MUSIC_BASS_BOOSTED",
+    # "FURIOUS_KEYBOARD_TYPING",
     # "GNOME",
-    #"METAL_PIPE_CRASH",
+    # "METAL_PIPE_CRASH",
 ]
 
 pattern_dialog = re.compile(r"\[?(.+?)\]?:\s*\[?(.*)\]?")
@@ -582,7 +590,7 @@ if args.script is None:
     user_prompt = args.prompt
     if args.prompt is None:
         user_prompt = input("Prompt: ")
-    
+
     print("Generating script...")
 
     # models like o1 cannot use the system prompt
@@ -614,9 +622,9 @@ if args.script is None:
     # generated_output = output.choices[0].message.content
     generated_output = generated_output.split("\n")
 else:
-    with open(args.script, "r") as f:
+    with open(args.script, "r", encoding="utf-8") as f:
         generated_output = [line.strip() for line in f]
-    
+
 
 title = generated_output[0].split(":")[-1].strip()
 title = re.sub(r"[^A-Za-z0-9 \-:]", "", title)
@@ -649,4 +657,3 @@ export_complete_audio(script, folder_name, title)
 if not args.noplayback:
     print("Performing...")
     perform_script(script)
-
