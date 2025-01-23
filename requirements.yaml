@@ -12,5 +12,6 @@ dependencies:
     - pandas
     - pip:
         - openai
+        - ollama
         - elevenlabs
         - playsound

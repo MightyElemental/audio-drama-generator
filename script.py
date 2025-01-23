@@ -8,6 +8,7 @@ import argparse
 import playsound
 import pandas
 from openai import OpenAI
+from ollama import chat as ollamachat
 import pydub
 from tqdm import tqdm
 from tqdm.contrib.concurrent import process_map
@@ -22,22 +23,36 @@ from elevenlabs import Voice, VoiceSettings
 # This requires a custom API
 openvoice_url = "http://localhost:8000/generate"
 
-GPT_MODELS = {
+TEXT_MODELS = {
     "gpt-4o": {
         "use_alt_sys_prompt": False,
         "max_tokens": 16384,
+        "provider": "OPENAI",
     },
     "gpt-4o-mini": {
         "use_alt_sys_prompt": False,
         "max_tokens": 16384,
+        "provider": "OPENAI",
     },
     "o1-preview": {
         "use_alt_sys_prompt": True,
         "max_tokens": None, # technically 32,768 tokens
+        "provider": "OPENAI",
     },
     "o1-mini": {
         "use_alt_sys_prompt": True,
         "max_tokens": None, # technically 65,536 tokens
+        "provider": "OPENAI",
+    },
+    "llama3.2": {
+        "use_alt_sys_prompt": False,
+        "max_tokens": 16384,
+        "provider": "OLLAMA",
+    },
+    "llama2-uncensored": {
+        "use_alt_sys_prompt": False,
+        "max_tokens": 16384,
+        "provider": "OLLAMA",
     },
 }
 
@@ -47,7 +62,7 @@ def parse_args():
     parser.add_argument("-p", "--prompt", type=str, default=None, help="The prompt to generate the scene")
     parser.add_argument("--noplayback", action="store_true", help="Whether the audio playback should be skipped")
     parser.add_argument("--scriptonly", action="store_true", help="Whether the audio generation should be skipped")
-    parser.add_argument("--model", type=str, default="gpt-4o-mini", choices=list(GPT_MODELS.keys()), help="The version of GPT to use")
+    parser.add_argument("--model", type=str, default="gpt-4o-mini", choices=list(TEXT_MODELS.keys()), help="The version of GPT to use")
     parser.add_argument("-c", "--compression", action="store_true", help="Enable instruction prompt compression")
     parser.add_argument("-i", "--dallever", type=int, default=3, choices=[2,3], help="Which version of DALL-E to use to generate visuals")
     parser.add_argument("--imagelimit", type=int, default=0, help="The limit of how many images to draw per script")
@@ -454,13 +469,25 @@ def construct_gpt_prompt(
     return messages
 
 def generate_script(messages: list, model: str = "gpt-4o-mini"):
-    max_tokens = GPT_MODELS[model]["max_tokens"]
-    return client.chat.completions.create(
-        messages=messages,
-        model=model,
-        stream=True,
-        max_completion_tokens=max_tokens,
-    )
+    provider = TEXT_MODELS[model]["provider"]
+    max_tokens = TEXT_MODELS[model]["max_tokens"]
+
+    if provider == "OPENAI":
+        return client.chat.completions.create(
+            messages=messages,
+            model=model,
+            stream=True,
+            max_completion_tokens=max_tokens,
+        )
+    elif provider == "OLLAMA":
+        return ollamachat(
+            model=model,
+            messages=messages,
+            stream=True,
+        )
+    else:
+        raise Exception(f"Unknown model provider: {model} ({provider})")
+
 
 def get_character_files() -> list[str]:
     folder_path = os.path.dirname(__file__)
@@ -596,8 +623,10 @@ if args.script is None:
 
     print("Generating script...")
 
+    model_in_use = TEXT_MODELS[args.model]
+
     # models like o1 cannot use the system prompt
-    use_alt_sys_prompt = GPT_MODELS[str(args.model)]["use_alt_sys_prompt"]
+    use_alt_sys_prompt = model_in_use["use_alt_sys_prompt"]
 
     messages = construct_gpt_prompt(
         init_prompt=user_prompt,
@@ -611,9 +640,16 @@ if args.script is None:
     for _ in tqdm(range(args.passes), desc="passes", unit=" pass"):
         output_stream = generate_script(messages, args.model)
         go = ""
-        pbar = tqdm(unit=" chunks", desc="Generating using GPT")
+        pbar = tqdm(unit=" chunks", desc=f"Generating using {args.model}")
         for chunk in output_stream:
-            content = chunk.choices[0].delta.content
+
+            if model_in_use["provider"] == "OPENAI":
+                content = chunk.choices[0].delta.content
+            elif model_in_use["provider"] == "OLLAMA":
+                content = chunk.message.content
+            else:
+                continue
+
             if content is not None:
                 go += content
                 pbar.set_postfix_str(f"generated {len(go.split("\n"))} lines")
