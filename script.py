@@ -563,6 +563,9 @@ sfx = [
     # "FURIOUS_KEYBOARD_TYPING",
     # "GNOME",
     # "METAL_PIPE_CRASH",
+    # "SCREAM_GET_OUT",
+    # "SPINNING_CAT",
+    # "WHAT_THE_HELL",
 ]
 
 pattern_dialog = re.compile(r"\[?(.+?)\]?:\s*\[?(.*)\]?")
