@@ -5,10 +5,15 @@ import os
 import subprocess
 import glob
 import argparse
+from typing import Iterator, Union
+
+from openai.types.chat import ChatCompletionChunk
+from openai._streaming import Stream
 import playsound
 import pandas
 from openai import OpenAI
 from ollama import chat as ollamachat
+from ollama import ChatResponse
 import pydub
 from tqdm import tqdm
 from tqdm.contrib.concurrent import process_map
@@ -24,6 +29,21 @@ from elevenlabs import Voice, VoiceSettings
 openvoice_url = "http://localhost:8000/generate"
 
 TEXT_MODELS = {
+    "gpt-4.1": {
+        "use_alt_sys_prompt": False,
+        "max_tokens": 32768,
+        "provider": "OPENAI",
+    },
+    "gpt-4.1-mini": {
+        "use_alt_sys_prompt": False,
+        "max_tokens": 32768,
+        "provider": "OPENAI",
+    },
+    "gpt-4.1-nano": {
+        "use_alt_sys_prompt": False,
+        "max_tokens": 32768,
+        "provider": "OPENAI",
+    },
     "gpt-4o": {
         "use_alt_sys_prompt": False,
         "max_tokens": 16384,
@@ -34,15 +54,15 @@ TEXT_MODELS = {
         "max_tokens": 16384,
         "provider": "OPENAI",
     },
-    "o1-preview": {
+    "o4-mini": {
         "use_alt_sys_prompt": True,
-        "max_tokens": None, # technically 32,768 tokens
+        "max_tokens": None, # technically 100,000 tokens
         "provider": "OPENAI",
     },
-    "o1-mini": {
-        "use_alt_sys_prompt": True,
-        "max_tokens": None, # technically 65,536 tokens
-        "provider": "OPENAI",
+    "gemma3:27b": {
+        "use_alt_sys_prompt": False,
+        "max_tokens": 16384,
+        "provider": "OLLAMA",
     },
     "llama3.2": {
         "use_alt_sys_prompt": False,
@@ -50,6 +70,16 @@ TEXT_MODELS = {
         "provider": "OLLAMA",
     },
     "llama2-uncensored": {
+        "use_alt_sys_prompt": False,
+        "max_tokens": 16384,
+        "provider": "OLLAMA",
+    },
+    "deepseek-r1:7b": {
+        "use_alt_sys_prompt": False,
+        "max_tokens": 16384,
+        "provider": "OLLAMA",
+    },
+    "deepseek-r1:14b": {
         "use_alt_sys_prompt": False,
         "max_tokens": 16384,
         "provider": "OLLAMA",
@@ -62,18 +92,22 @@ def parse_args():
     parser.add_argument("-p", "--prompt", type=str, default=None, help="The prompt to generate the scene")
     parser.add_argument("--noplayback", action="store_true", help="Whether the audio playback should be skipped")
     parser.add_argument("--scriptonly", action="store_true", help="Whether the audio generation should be skipped")
-    parser.add_argument("--model", type=str, default="gpt-4o-mini", choices=list(TEXT_MODELS.keys()), help="The version of GPT to use")
+    parser.add_argument("--model", type=str, default="gpt-4.1-nano", choices=list(TEXT_MODELS.keys()), help="The LLM to use")
     parser.add_argument("-c", "--compression", action="store_true", help="Enable instruction prompt compression")
     parser.add_argument("-i", "--dallever", type=int, default=3, choices=[2,3], help="Which version of DALL-E to use to generate visuals")
     parser.add_argument("--imagelimit", type=int, default=0, help="The limit of how many images to draw per script")
     parser.add_argument("--passes", type=int, default=1, help="How many times to prompt GPT (more passes makes a longer story)")
     parser.add_argument("-w", "--workers", type=int, default=2, help="How many worker threads to use when generating audio samples")
     parser.add_argument("--characters", type=str, nargs="+", required=True, help="A list of the characters you wish to use. Use LIST to see available characters.")
+    parser.add_argument("--debug", action="store_true", help="Whether to print debug messages.")
     return parser.parse_args()
 
+def debug(message: str):
+    if args.debug:
+        print(f"DEBUG: {message}")
+
 def create_folder(folder_path: str):
-    if not os.path.exists(folder_path):
-        os.makedirs(folder_path)
+    os.makedirs(folder_path, exist_ok=True)
 
 def get_el_voice(VID: str, stability: float = 0.5, similarity: float = 0.75, style: float = 0.5):
     return Voice(
@@ -119,7 +153,7 @@ def generate_dectalk_audio(voice: int, dialog: str, file: str):
     # TODO: Verify security of calling a command using direct text
     text = re.sub("[^A-Za-z0-9 -.,!?()]", "", dialog)
     folder = os.path.dirname(file)
-    create_folder(folder)
+    os.makedirs(folder, exist_ok=True)
     subprocess.run(["./dectalk/say","-e","1","-s",str(voice),"-a",text,"-fo",file], check=True)
 
 def generate_oai_audio(voice: str, dialog: str):
@@ -152,6 +186,13 @@ def generate_ov_audio(voice: str, dialog: str, file: str):
             f.write(response.content)
     else:
         print(f"Got {response.status_code} - Failed to generate: {voice} - {dialog}")
+
+def trim_thinking(text: str) -> str:
+    """Trims the thought process from the start of the text"""
+    # if the text starts with <think>, then it should substring everything after </think>
+    if text.startswith("<think>"):
+        return text[(text.find("</think>")+len("</think>")):].strip()
+    return text
 
 def save_list(l: list, file: str):
     """Save a list to a file where each element is a separate line
@@ -438,7 +479,19 @@ def construct_gpt_prompt(
     character_prompt = generate_character_strlist()
     sfx_prompt = generate_sfx_strlist()
 
-    instruction_text = f"You will write a long script with narrative flow involving some or all of the following characters along with their CHARACTER_NAME variables in brackets:\n{character_prompt}. You will write character dialogue based on the user's prompt. Expand upon the user's prompt by generating a more detailed scenario. ONLY the first line of the output will be the title for the script. Do NOT end the story on a happy note unless the user has explicitly asked for it. Do NOT include any stage direction or action. If you receive a script, continue it where it leaves off."
+    instruction_text = f"""
+        You will write a long script with narrative flow.
+        Include some or all of the following characters along with their CHARACTER_NAME variables in brackets:\n{character_prompt}.
+        The characters' dialogue should sound like what the character would actually say.
+        The dialogue should sound natural.
+        If the character shares a name with a character from pop culture, assume that's what's intended.
+        You will write character dialogue based on the user's prompt.
+        Expand upon the user's prompt by generating a more detailed scenario.
+        ONLY the first line of the output will be the title for the script.
+        Do NOT end the story on a happy note unless the user has explicitly asked for it.
+        Do NOT include any stage direction or action.
+        If you receive a script, continue it where it leaves off.
+    """
     # , however, you can also write a detailed description of the visuals that can be passed into an image generator so the audience can see what you're thinking of
 
     format_text = "Each character's dialogue will be on a new line and formatted as a key value pair on the same line and deliminated by a colon: [${CHARACTER_NAME}]:${CHARACTER_DIALOGUE}. The [CHARACTER_NAME] MUST be encapulated by square brackets and be an EXACT match to one previously listed."
@@ -461,14 +514,18 @@ def construct_gpt_prompt(
 
     messages.append({ "role": sys_role, "content": instruction_text, })
     messages.append({ "role": sys_role, "content": format_text, })
-    messages.append({ "role": sys_role, "content": sfx_text, })
+    if len(sfx) > 0: # Only include sounds if the sound list is not empty
+        messages.append({ "role": sys_role, "content": sfx_text, })
     if use_images:
         messages.append({ "role": sys_role, "content": img_text, })
     messages.append({ "role": "user", "content": init_prompt or "make up a random story", })
 
     return messages
 
-def generate_script(messages: list, model: str = "gpt-4o-mini"):
+def generate_script(
+        messages: list,
+        model: str = "gpt-4o-mini"
+    ) -> Union[Stream[ChatCompletionChunk], Iterator[ChatResponse]]:
     provider = TEXT_MODELS[model]["provider"]
     max_tokens = TEXT_MODELS[model]["max_tokens"]
 
@@ -486,7 +543,7 @@ def generate_script(messages: list, model: str = "gpt-4o-mini"):
             stream=True,
         )
     else:
-        raise Exception(f"Unknown model provider: {model} ({provider})")
+        raise ValueError(f"Unknown model provider: {model} ({provider})")
 
 
 def get_character_files() -> list[str]:
@@ -579,17 +636,17 @@ sfx = [
     # "DOOR_OPEN",
     # "DOOR_SMASH_BREAK",
     # "AUTOMATIC_GUN_FIRE",
-    # "PISTOL_SINGLE_FIRE",
+    "PISTOL_SINGLE_FIRE",
     # "BIG_GLASS_SMASH",
-    # "GLASS_SHATTER",
+    "GLASS_SHATTER",
     # "MAGIC_SPARKLES",
     # "GOOFY_CAR_HORN",
     # "BAD_TO_THE_BONE_FUNNY",
     # "FBI_OPEN_UP",
     # "AMOGUS_MUSIC_BASS_BOOSTED",
     # "FURIOUS_KEYBOARD_TYPING",
-    # "GNOME",
-    # "METAL_PIPE_CRASH",
+    "GNOME",
+    "METAL_PIPE_CRASH",
     # "SCREAM_GET_OUT",
     # "SPINNING_CAT",
     # "WHAT_THE_HELL",
@@ -659,6 +716,10 @@ if args.script is None:
         messages.append({ "role": "user", "content": "continue the script", }) # TODO: Further test the continuation prompt. Add compression?
         generated_output += f"{go}\n"
     # generated_output = output.choices[0].message.content
+    debug("====TEXT OUTPUT====\n")
+    debug(generated_output)
+    debug("\n===================\n")
+    generated_output = trim_thinking(generated_output) # Remove thought process
     generated_output = generated_output.split("\n")
 else:
     with open(args.script, "r", encoding="utf-8") as f:
@@ -673,12 +734,15 @@ print_standout(title)
 
 # Create save location & save script, prompt
 if args.script is None:
-    create_folder(f"generated/{folder_name}")
-    save_list(generated_output, f"generated/{folder_name}/script.txt")
-    save_list([user_prompt], f"generated/{folder_name}/prompt.txt")
+    script_folder = os.path.join("generated", folder_name)
+    debug("Saving script")
+    os.makedirs(script_folder, exist_ok=True)
+    save_list(generated_output, os.path.join(script_folder, "script.txt"))
+    save_list([user_prompt], os.path.join(script_folder, "prompt.txt"))
 
 # Stop before audio generation
-if args.scriptonly: exit(0)
+if args.scriptonly:
+    exit(0)
 
 # Remove title
 generated_output = generated_output[1:]
